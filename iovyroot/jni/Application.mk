@@ -1,0 +1,7 @@
+APP_CPPFLAGS := -DLOGFILE
+APP_CPPFLAGS += -DDONT_ENCODE
+
+APP_PLATFORM := android-19
+APP_ABI := armeabi-v7a armeabi
+
+NDK_TOOLCHAIN_VERSION := clang3.5
