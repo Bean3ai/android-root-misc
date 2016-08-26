@@ -436,11 +436,10 @@ static unsigned long *find_kernel_symbol_tab(void)
                 if (v1 >= KERNEL_START) {
                         while ( i < MIN_LEN ) {
                                 v2 = READ(addr + 1);
-                                if (v2 >= KERNEL_START
-                                    && v2 >= v1) {
+                                if (v2 >= v1) {
                                         addr++;
                                         i++;
-                                        v1 = READ(addr);
+                                        v1 = v2;
                                         continue;
                                 }
                                 break;
